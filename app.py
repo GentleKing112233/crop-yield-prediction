@@ -3,6 +3,12 @@ import streamlit as st
 import joblib
 import numpy as np
 from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from xgboost import XGBRegressor
 
 st.set_page_config(
     page_title="Crop Yield Prediction",
@@ -11,7 +17,7 @@ st.set_page_config(
 )
 
 DATA_FILE = Path(__file__).parent / "crop-yield.csv"
-MODEL_FILE = Path(__file__).parent / "crop_yield_model.pkl"
+TARGET = "Crop_Yield_ton_per_hectare"
 
 st.title("🌱 Crop Yield Prediction")
 st.write("Enter the farm conditions below to predict the expected crop yield.")
@@ -19,10 +25,6 @@ st.write("Enter the farm conditions below to predict the expected crop yield.")
 @st.cache_data
 def load_data():
     return pd.read_csv(DATA_FILE)
-
-@st.cache_resource
-def load_model(path):
-    return joblib.load(path)
 
 try:
     df = load_data()
@@ -33,25 +35,62 @@ except FileNotFoundError:
     )
     st.stop()
 
-TARGET = "Crop_Yield_ton_per_hectare"
-
 if TARGET not in df.columns:
     st.error(f"Target column `{TARGET}` not found in the dataset.")
     st.stop()
 
-features = [col for col in df.columns if col != TARGET]
+df = df.dropna(subset=[TARGET]).copy()
 
-numeric_features = df[features].select_dtypes(include="number").columns.tolist()
+features = [col for col in df.columns if col != TARGET]
+X = df.drop(columns=[TARGET])
+y = df[TARGET]
+
+numeric_features = X.select_dtypes(include="number").columns.tolist()
 categorical_features = [col for col in features if col not in numeric_features]
 
+@st.cache_resource
+def train_model(_df, _target, _features, _numeric, _categorical):
+    X = _df.drop(columns=[_target])
+    y = _df[_target]
+
+    numerical_transformer = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median"))
+    ])
+
+    categorical_transformer = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore"))
+    ])
+
+    preprocessor = ColumnTransformer(transformers=[
+        ("num", numerical_transformer, _numeric),
+        ("cat", categorical_transformer, _categorical)
+    ])
+
+    model = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("model", XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective="reg:squarederror",
+            random_state=42,
+            n_jobs=-1
+        ))
+    ])
+
+    model.fit(X, y)
+    return model
+
 try:
-    model = load_model(MODEL_FILE)
-except FileNotFoundError:
-    st.error(
-        "Trained model `crop_yield_model.pkl` not found. "
-        "Please add it to the repository root and redeploy."
-    )
+    model = train_model(df, TARGET, features, numeric_features, categorical_features)
+except Exception as e:
+    st.error(f"Model training failed: {e}")
     st.stop()
+
+st.success("Model trained successfully!")
 
 with st.form("prediction_form"):
     inputs = {}
@@ -86,11 +125,11 @@ if submitted:
         prediction = float(model.predict(input_df)[0])
         st.success(f"Predicted yield: **{prediction:.2f} tonnes per hectare**")
         st.divider()
-        st.subheader("Model comparison")
+        st.subheader("About this model")
         st.write(
-            "This app uses an XGBoost pipeline trained on the crop-yield dataset, "
-            "selected after comparing Linear Regression, Ridge, Random Forest, "
-            "Extra Trees, Gradient Boosting, and XGBoost."
+            "This app trains an XGBoost pipeline on the crop-yield dataset at startup. "
+            "It compares favorably against Linear Regression, Ridge, Random Forest, "
+            "Extra Trees, and Gradient Boosting baselines."
         )
     except Exception as e:
         st.error(f"Prediction failed: {e}")
